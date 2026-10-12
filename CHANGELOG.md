@@ -1,3 +1,8 @@
+# Unreleased
+
+## Fixes
+- **Quota Tracker**: hide and restore quota rows per account while preserving existing provider preferences (#4767)
+
 # v0.5.109 (2026-10-23)
 
 ## Features
