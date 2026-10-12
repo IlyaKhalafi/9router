@@ -326,23 +326,62 @@ export function trimHiddenQuotaKeys(hidden = [], quotas = []) {
   return [...new Set(hidden.map((k) => String(k).trim()).filter((k) => validKeys.has(k)))];
 }
 
-function getProviderHiddenQuotaSet(provider, quotaVisibility, quotas = []) {
-  const hidden = quotaVisibility?.[provider]?.hidden;
+function getQuotaVisibility(provider, connectionId, quotaVisibility) {
+  const providerVisibility = quotaVisibility?.[provider] || {};
+  // Keep legacy provider preferences as defaults until an account overrides them.
+  return providerVisibility.connections?.[connectionId] || providerVisibility;
+}
+
+export function setQuotaHidden(provider, connectionId, quota, quotaVisibility = {}, hide = true) {
+  const key = getQuotaVisibilityKey(quota);
+  if (!provider || !connectionId || !key) return quotaVisibility;
+
+  const providerVisibility = quotaVisibility[provider] || {};
+  const current = getQuotaVisibility(provider, connectionId, quotaVisibility);
+  const hidden = new Set(Array.isArray(current.hidden)
+    ? current.hidden.map((k) => String(k).trim()).filter(Boolean) : []);
+  if (hide) hidden.add(key);
+  else hidden.delete(key);
+
+  if (provider === "antigravity") {
+    for (const k of hidden) {
+      if ((key === "gemini" && k.startsWith("gemini-") && !k.includes("image"))
+        || (key === "claude" && k.startsWith("claude-"))) hidden.delete(k);
+    }
+  }
+
+  return {
+    ...quotaVisibility,
+    [provider]: {
+      ...providerVisibility,
+      connections: {
+        ...providerVisibility.connections,
+        [connectionId]: {
+          ...providerVisibility.connections?.[connectionId],
+          hidden: [...hidden],
+        },
+      },
+    },
+  };
+}
+
+function getProviderHiddenQuotaSet(provider, quotaVisibility, quotas = [], connectionId) {
+  const hidden = getQuotaVisibility(provider, connectionId, quotaVisibility).hidden;
   if (!Array.isArray(hidden) || hidden.length === 0) return new Set();
   const trimmed = quotas.length > 0 ? trimHiddenQuotaKeys(hidden, quotas) : hidden;
   return new Set(trimmed.map(String));
 }
 
-export function filterQuotasByVisibility(provider, quotas = [], quotaVisibility = {}) {
+export function filterQuotasByVisibility(provider, quotas = [], quotaVisibility = {}, connectionId) {
   if (!Array.isArray(quotas) || quotas.length === 0) return [];
-  const hidden = getProviderHiddenQuotaSet(provider, quotaVisibility, quotas);
+  const hidden = getProviderHiddenQuotaSet(provider, quotaVisibility, quotas, connectionId);
   if (hidden.size === 0) return quotas;
   return quotas.filter((quota) => !hidden.has(getQuotaVisibilityKey(quota)));
 }
 
-export function getHiddenQuotaRows(provider, quotas = [], quotaVisibility = {}) {
+export function getHiddenQuotaRows(provider, quotas = [], quotaVisibility = {}, connectionId) {
   if (!Array.isArray(quotas) || quotas.length === 0) return [];
-  const hidden = getProviderHiddenQuotaSet(provider, quotaVisibility, quotas);
+  const hidden = getProviderHiddenQuotaSet(provider, quotaVisibility, quotas, connectionId);
   if (hidden.size === 0) return [];
   return quotas.filter((quota) => hidden.has(getQuotaVisibilityKey(quota)));
 }
