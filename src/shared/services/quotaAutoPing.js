@@ -31,6 +31,7 @@ const g = (global.__quotaAutoPing ??= {
   running: false,
   resetCache: {},
   failureCache: {},
+  pingedResetCache: {},
 });
 
 function cacheKey(provider, connectionId) {
@@ -84,13 +85,24 @@ function hasExhaustedBlockingQuota(quotas, sessionKey) {
   return Object.entries(quotas || {}).some(([name, quota]) => isBlockingQuotaName(name, sessionKey) && isQuotaExhausted(quota));
 }
 
-function shouldPingForReset(providerConfig, cachedReset, resetAt, now) {
+function getResetToPing(providerConfig, cachedReset, resetAt, now) {
   if (providerConfig.pingWhenResetAtSlides) {
-    return Boolean(cachedReset) && getResetDriftMs(cachedReset, resetAt) >= (providerConfig.resetAtDriftMs || 0);
+    return cachedReset && getResetDriftMs(cachedReset, resetAt) >= (providerConfig.resetAtDriftMs || 0)
+      ? resetAt : null;
   }
 
   const resetMs = new Date(resetAt).getTime();
-  return Number.isFinite(resetMs) && now >= resetMs - C.pingLeadMs;
+  if (!Number.isFinite(resetMs)) return null;
+  if (now >= resetMs - C.pingLeadMs) return resetAt;
+
+  // A tick can miss the lead window and observe the next reset instead.
+  // Deduplicate against the expired reset that triggered this catch-up ping.
+  // Ignore small timestamp changes within the normal quota refresh window.
+  const cachedResetMs = cachedReset ? new Date(cachedReset).getTime() : NaN;
+  return Number.isFinite(cachedResetMs) && cachedResetMs - C.pingLeadMs <= now
+    && now - cachedResetMs < C.catchUpWindowMs
+    && resetMs - cachedResetMs > C.refreshAheadMs
+    ? cachedReset : null;
 }
 
 function buildProxyOptions(cfg) {
@@ -214,36 +226,45 @@ async function pingConnection(conn, provider, providerConfig, handler, deps, sta
   const resetAt = quota?.resetAt;
   if (!resetAt) return;
 
-  state.resetCache[key] = resetAt;
+  const now = Date.now();
+  const resetToPing = getResetToPing(providerConfig, cachedReset, resetAt, now);
+  const isCatchUp = resetToPing && resetToPing !== resetAt;
+  // Keep a missed reset pending until the ping succeeds or was already sent.
+  if (!isCatchUp) state.resetCache[key] = resetAt;
 
   if (providerConfig.skipWhenBlockingQuotaExhausted && hasExhaustedBlockingQuota(quotas, providerConfig.quotaKey)) return;
   if (isQuotaExhausted(quota)) return;
+  if (!resetToPing) return;
 
-  const now = Date.now();
-  const resetKey = normalizeResetKey(resetAt);
+  const resetKey = normalizeResetKey(resetToPing);
   const lastPingedResetKey = connection.lastPingedResetKey || normalizeResetKey(connection.lastPingedResetAt);
 
   // Claude waits for reset. Codex pings only when resetAt slides, which means the 5h window is inactive.
-  if (!shouldPingForReset(providerConfig, cachedReset, resetAt, now)) return;
-  if (wasPingedRecently(connection, providerConfig.minPingIntervalMs, now)) return;
-  if (lastPingedResetKey === resetKey) return;
+  if (wasPingedRecently(connection, providerConfig.minPingIntervalMs, now)
+    || lastPingedResetKey === resetKey || state.pingedResetCache?.[key] === resetKey) {
+    state.resetCache[key] = resetAt;
+    return;
+  }
 
   const ok = await handler.sendPing(connection, providerConfig, proxyOptions, deps);
   if (!ok) {
     // Do not mark reset as pinged unless upstream accepted the tiny request.
     state.failureCache[key] = Date.now();
-    console.warn(`[AutoPing] ${provider}:${connection.id}: ping failed (reset ${resetAt})`);
+    console.warn(`[AutoPing] ${provider}:${connection.id}: ping failed (reset ${resetToPing})`);
     return;
   }
 
+  state.resetCache[key] = resetAt;
+  // Preserve accepted pings through marker write failures and older hot-reload state.
+  (state.pingedResetCache ??= {})[key] = resetKey;
   delete state.failureCache[key];
   await deps.updateProviderConnection(connection.id, {
-    lastPingedResetAt: resetAt,
+    lastPingedResetAt: resetToPing,
     lastPingedResetKey: resetKey,
     lastPingAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   });
-  console.log(`[AutoPing] ${provider}:${connection.id}: ping sent (reset ${resetAt})`);
+  console.log(`[AutoPing] ${provider}:${connection.id}: ping sent (reset ${resetToPing})`);
 }
 
 function createDefaultDeps() {

@@ -1,3 +1,8 @@
+# Unreleased
+
+## Fixes
+- **Claude**: catch up quota auto-ping when a reset rolls forward between scheduler ticks; retry missed resets for up to 30 minutes and avoid duplicate pings (#4001)
+
 # v0.5.99 (2026-10-08)
 
 ## Features
