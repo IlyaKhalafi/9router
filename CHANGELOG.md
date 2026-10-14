@@ -1,3 +1,8 @@
+# Unreleased
+
+## Fixes
+- Keep custom provider prefixes such as `constructor` from crashing the terminal model picker (#4833).
+
 # v0.5.109 (2026-10-23)
 
 ## Features
