@@ -1,3 +1,8 @@
+# Unreleased
+
+## Fixes
+- Return a network error when a CLI API response disconnects after sending headers (#4832).
+
 # v0.5.109 (2026-10-23)
 
 ## Features
