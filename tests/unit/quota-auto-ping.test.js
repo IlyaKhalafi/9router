@@ -72,7 +72,7 @@ describe("quota auto-ping", () => {
     getExecutor.mockReturnValue({
       execute: vi.fn().mockResolvedValue({ response: { ok: true, text: codexResponseText } }),
     });
-    state = { running: false, resetCache: {}, failureCache: {}, pingedResetCache: {} };
+    state = { running: false, resetCache: {}, failureCache: {} };
     vi.setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
   });
 
@@ -244,7 +244,7 @@ describe("quota auto-ping", () => {
     expect(deps.updateProviderConnection).not.toHaveBeenCalled();
   });
 
-  it("sends one tiny gpt-5.5 Codex request through the executor", async () => {
+  it("sends one tiny gpt-5.6-terra Codex request through the executor", async () => {
     deps.getSettings.mockResolvedValue({ codexAutoPing: { connections: { "codex-1": true } } });
     deps.getProviderConnections.mockImplementation(async ({ provider }) => (
       provider === "codex"
@@ -261,7 +261,7 @@ describe("quota auto-ping", () => {
     const executor = deps.getExecutor.mock.results[0].value;
     expect(deps.getExecutor).toHaveBeenCalledWith("codex");
     expect(executor.execute).toHaveBeenCalledWith(expect.objectContaining({
-      model: "gpt-5.5",
+      model: "gpt-5.6-terra",
       stream: true,
       credentials: expect.objectContaining({
         accessToken: "token",
@@ -269,7 +269,7 @@ describe("quota auto-ping", () => {
         providerSpecificData: { workspaceId: "ws-1" },
       }),
       body: {
-        model: "gpt-5.5",
+        model: "gpt-5.6-terra",
         input: [{
           type: "message",
           role: "user",
@@ -335,7 +335,197 @@ describe("quota auto-ping", () => {
       messages: [{ role: "user", content: "hi" }],
     });
   });
+  describe("anchored schedule", () => {
+    const schedule = {
+      enabled: true,
+      anchor: "09:30",
+      timezone: "America/Sao_Paulo",
+      windowHours: 5,
+      slotsPerDay: 3,
+    };
 
+    const codexConnection = (extra = {}) => ({
+      id: "codex-1", provider: "codex", authType: "oauth", accessToken: "token", ...extra,
+    });
+
+    const settingsWithSchedule = (overrides = {}) => ({
+      codexAutoPing: {
+        connections: { "codex-1": true },
+        schedules: { "codex-1": { ...schedule, ...overrides } },
+      },
+    });
+
+    let connection = codexConnection();
+
+    beforeEach(() => {
+      connection = codexConnection();
+      deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+        provider === "codex" ? [connection] : []
+      ));
+    });
+
+    it("pings on the 09:30 BRT slot even when resetAt is stable", async () => {
+      // 12:31 UTC = 09:31 BRT — the reactive path alone would stay quiet here.
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      deps.getSettings.mockResolvedValue(settingsWithSchedule());
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).toHaveBeenCalledTimes(1);
+      expect(deps.updateProviderConnection).toHaveBeenCalledWith("codex-1", expect.objectContaining({
+        lastPingedSlotKey: "2026-08-20#0",
+      }));
+    });
+
+    it("does not repeat a slot that was already pinged", async () => {
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      connection = codexConnection({ lastPingedSlotKey: "2026-08-20#0" });
+      deps.getSettings.mockResolvedValue(settingsWithSchedule());
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).not.toHaveBeenCalled();
+    });
+
+    it("stays quiet overnight", async () => {
+      // 06:00 UTC = 03:00 BRT, outside every slot.
+      vi.setSystemTime(new Date("2026-08-20T06:00:00.000Z"));
+      deps.getSettings.mockResolvedValue(settingsWithSchedule());
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).not.toHaveBeenCalled();
+    });
+
+    it("keeps the reactive ping working alongside the schedule", async () => {
+      vi.setSystemTime(new Date("2026-08-20T06:00:00.000Z"));
+      deps.getSettings.mockResolvedValue(settingsWithSchedule());
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:01:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).toHaveBeenCalledTimes(1);
+      expect(deps.updateProviderConnection).toHaveBeenCalledWith("codex-1", expect.not.objectContaining({
+        lastPingedSlotKey: expect.anything(),
+      }));
+    });
+
+    it("ignores a disabled schedule", async () => {
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      deps.getSettings.mockResolvedValue(settingsWithSchedule({ enabled: false }));
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).not.toHaveBeenCalled();
+    });
+
+    it("pings Claude on a slot before its reset is due", async () => {
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      deps.getSettings.mockResolvedValue({
+        claudeAutoPing: {
+          connections: { "claude-1": true },
+          schedules: { "claude-1": schedule },
+        },
+      });
+      deps.getProviderConnections.mockImplementation(async ({ provider }) => (
+        provider === "claude" ? [{ id: "claude-1", provider: "claude", authType: "oauth", accessToken: "token" }] : []
+      ));
+      state.resetCache["claude:claude-1"] = "2026-08-20T23:00:00.000Z";
+      getClaudeUsage.mockResolvedValue({
+        quotas: { "session (5h)": { resetAt: "2026-08-20T23:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.proxyAwareFetch).toHaveBeenCalledTimes(1);
+      expect(deps.updateProviderConnection).toHaveBeenCalledWith("claude-1", expect.objectContaining({
+        lastPingedSlotKey: "2026-08-20#0",
+      }));
+    });
+
+    it("runs a schedule on a connection with the reactive ping switched off", async () => {
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      deps.getSettings.mockResolvedValue({
+        codexAutoPing: {
+          connections: { "codex-1": false },
+          schedules: { "codex-1": schedule },
+        },
+      });
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).toHaveBeenCalledTimes(1);
+      expect(deps.updateProviderConnection).toHaveBeenCalledWith("codex-1", expect.objectContaining({
+        lastPingedSlotKey: "2026-08-20#0",
+      }));
+    });
+
+    it("does not fall back to the reactive ping when only the schedule is on", async () => {
+      // resetAt slides, which is exactly what the reactive Codex path pings on.
+      vi.setSystemTime(new Date("2026-08-20T06:00:00.000Z"));
+      deps.getSettings.mockResolvedValue({
+        codexAutoPing: {
+          connections: { "codex-1": false },
+          schedules: { "codex-1": schedule },
+        },
+      });
+      state.resetCache["codex:codex-1"] = "2026-08-20T20:00:00.000Z";
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 1, total: 100, remaining: 99, resetAt: "2026-08-20T20:01:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).not.toHaveBeenCalled();
+    });
+
+    it("needs the scheduler running for a schedule alone", async () => {
+      const { hasAnyAutoPingEnabled } = await import("../../src/shared/services/quotaAutoPing.js");
+
+      expect(hasAnyAutoPingEnabled({ codexAutoPing: { connections: { "codex-1": false } } })).toBe(false);
+      expect(hasAnyAutoPingEnabled({
+        codexAutoPing: { connections: { "codex-1": false }, schedules: { "codex-1": schedule } },
+      })).toBe(true);
+      expect(hasAnyAutoPingEnabled({
+        codexAutoPing: { connections: {}, schedules: { "codex-1": { ...schedule, enabled: false } } },
+      })).toBe(false);
+    });
+
+    it("skips the slot when the quota is exhausted", async () => {
+      vi.setSystemTime(new Date("2026-08-20T12:31:00.000Z"));
+      deps.getSettings.mockResolvedValue(settingsWithSchedule());
+      getCodexUsage.mockResolvedValue({
+        quotas: { session: { used: 100, total: 100, remaining: 0, resetAt: "2026-08-20T20:00:00.000Z" } },
+      });
+
+      await runQuotaAutoPingTick(deps, state);
+
+      expect(deps.getExecutor).not.toHaveBeenCalled();
+    });
+  });
   function enableClaudeAutoPing() {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
@@ -347,6 +537,52 @@ describe("quota auto-ping", () => {
     deps.updateProviderConnection.mockImplementation(async (_id, patch) => Object.assign(connection, patch));
     return connection;
   }
+
+  it.each([true, false])("respects reactive mode %s between Claude schedule slots", async (reactive) => {
+    enableClaudeAutoPing();
+    deps.getSettings.mockResolvedValue({
+      claudeAutoPing: {
+        connections: { "claude-1": reactive },
+        schedules: {
+          "claude-1": { enabled: true, anchor: "14:00", timezone: "UTC", windowHours: 5, slotsPerDay: 1 },
+        },
+      },
+    });
+    state.resetCache["claude:claude-1"] = "2026-01-01T12:00:00.000Z";
+    getClaudeUsage.mockResolvedValue({
+      quotas: { "session (5h)": { remaining: 100, resetAt: "2026-01-01T17:00:00.000Z" } },
+    });
+
+    await runQuotaAutoPingTick(deps, state);
+
+    expect(deps.proxyAwareFetch).toHaveBeenCalledTimes(reactive ? 1 : 0);
+    if (reactive) {
+      expect(deps.updateProviderConnection).toHaveBeenCalledWith("claude-1", expect.objectContaining({
+        lastPingedResetAt: "2026-01-01T12:00:00.000Z",
+      }));
+    }
+  });
+
+  it("runs a Claude schedule without a reported reset or reactive opt-in", async () => {
+    enableClaudeAutoPing();
+    deps.getSettings.mockResolvedValue({
+      claudeAutoPing: {
+        schedules: {
+          "claude-1": { enabled: true, anchor: "12:00", timezone: "UTC", windowHours: 5, slotsPerDay: 1 },
+        },
+      },
+    });
+    getClaudeUsage.mockResolvedValue({ quotas: {} });
+
+    await runQuotaAutoPingTick(deps, state);
+    vi.setSystemTime(new Date("2026-01-01T12:01:00.000Z"));
+    await runQuotaAutoPingTick(deps, state);
+
+    expect(deps.proxyAwareFetch).toHaveBeenCalledTimes(1);
+    const patch = deps.updateProviderConnection.mock.calls[0][1];
+    expect(patch.lastPingedSlotKey).toBe("2026-01-01#0");
+    expect(patch).not.toHaveProperty("lastPingedResetAt");
+  });
 
   it("catches a Claude reset that rolls forward between scheduler ticks", async () => {
     enableClaudeAutoPing();
