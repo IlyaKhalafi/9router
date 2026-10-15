@@ -3,13 +3,21 @@ import { PROVIDERS, PROVIDER_OAUTH } from "./providers.js";
 import { ANTIGRAVITY_IDE_USER_AGENT } from "../providers/shared.js";
 import { createRequire } from "module";
 
+// Nous Portal requires attribution for some API-key models. Use a neutral
+// router identity rather than exposing a credential or claiming another client.
+export const NOUS_ATTRIBUTION = {
+  hostname: "inference-api.nousresearch.com",
+  chatCompletionsPath: "/v1/chat/completions",
+  tags: ["product=9router", "client=9router", "user=9router"],
+};
+
 // === Gemini CLI === derive từ registry gemini-cli.transport
 export const GEMINI_CLI_VERSION = PROVIDERS["gemini-cli"]?.cliVersion;
 export const GEMINI_CLI_API_CLIENT = PROVIDERS["gemini-cli"]?.apiClient;
 
 // === Codex CLI === derive từ registry codex.transport
 export const CODEX_CLI_VERSION = PROVIDERS["codex"]?.cliVersion;
-export const CODEX_IMAGES_MAIN_MODEL = "gpt-5.6-luna";
+export const CODEX_IMAGES_MAIN_MODEL = "gpt-5.6-sol";
 
 // Map Node arch to Gemini CLI arch string (x64/x86/arm64/...)
 function geminiCLIArch() {
