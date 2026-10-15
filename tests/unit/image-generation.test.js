@@ -17,10 +17,12 @@ const originalFetch = global.fetch;
 
 describe("handleImageGenerationCore", () => {
   beforeEach(() => {
+    vi.stubEnv("CODEX_IMAGE_RESPONSES_MODEL", "");
     global.fetch = vi.fn();
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     global.fetch = originalFetch;
     vi.useRealTimers();
   });
