@@ -1,3 +1,9 @@
+# Unreleased
+
+## Fixes
+
+- Preserve Cursor conversation history and tool results in AgentService requests and keep system instructions before the transcript (#4862).
+
 # v0.5.109 (2026-10-23)
 
 ## Features

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 
 import { CursorExecutor } from "../../open-sse/executors/cursor.js";
 import { decodeMessage, encodeField, wrapConnectRPCFrame } from "../../open-sse/utils/cursorProtobuf.js";
+import { openaiToCursorRequest } from "../../open-sse/translator/request/openai-to-cursor.js";
 
 const LEN = 2;
 
@@ -73,6 +74,32 @@ async function runAgent({ frames, stream, model = "gpt-5.2", tools }) {
 }
 
 describe("CursorExecutor AgentService exec_request handling", () => {
+  it.each([false, true])("sends translated history through execute with stream %s", async (stream) => {
+    const executor = new CursorExecutor();
+    const written = stubAgentSession(executor, [textFrame("pineapple"), turnEndedFrame()]);
+    const body = openaiToCursorRequest("gpt-5.2", { messages: [
+      { role: "system", content: "Answer briefly" },
+      { role: "developer", content: "Remember the conversation" },
+      { role: "user", content: "The secret word is pineapple" },
+      { role: "assistant", content: "Remembered" },
+      { role: "user", content: "What is the secret word?" },
+    ] });
+    const { response } = await executor.execute({ model: "gpt-5.2", body, stream, credentials });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(written).toHaveLength(1);
+    const run = decodeMessage(decodeMessage(written[0].subarray(5)).get(1)[0].value);
+    const action = decodeMessage(run.get(2)[0].value);
+    const userAction = decodeMessage(action.get(1)[0].value);
+    const userMessage = decodeMessage(userAction.get(1)[0].value);
+    const text = Buffer.from(userMessage.get(1)[0].value).toString("utf8");
+    expect(text.startsWith("Answer briefly\n\nRemember the conversation\n\n")).toBe(true);
+    expect(text).toContain("The secret word is pineapple");
+    expect(text).toContain("Remembered");
+    expect(text.endsWith("What is the secret word?")).toBe(true);
+    expect(userAction.has(7)).toBe(false);
+  });
+
   for (const intent of [{ reasoning_effort: "high" }, { reasoning: { effort: "high" } }]) {
     it(`passes ${Object.keys(intent)[0]} through the AgentService executor`, async () => {
       const executor = new CursorExecutor();
@@ -216,12 +243,14 @@ describe("CursorExecutor AgentService exec_request handling", () => {
 });
 
 describe("Cursor long-session empty-turn recovery", () => {
-  // agent.v1.AgentClientMessage.run_request → conversation_action (2) →
-  // user_action (1) → conversation_history (7). Present = full replay frame.
-  function runFrameHasHistory(frame) {
+  // Read UserMessage.text from the nested RunRequest and UserMessageAction.
+  // Full replay inlines conversation history; a tail-only retry omits it.
+  function runFrameText(frame) {
     const run = decodeMessage(decodeMessage(frame.subarray(5)).get(1)[0].value);
     const userAction = decodeMessage(decodeMessage(run.get(2)[0].value).get(1)[0].value);
-    return userAction.has(7);
+    const userMessage = decodeMessage(userAction.get(1)[0].value);
+    const text = Buffer.from(userMessage.get(1)[0].value).toString("utf8");
+    return text;
   }
 
   // 79 filler turns + the live user turn → threshold met by default (80).
@@ -269,8 +298,10 @@ describe("Cursor long-session empty-turn recovery", () => {
     const text = await result.response.text();
     expect(writtenPerAttempt).toHaveLength(2);
     // First attempt replays full history; the retry ships a tail-only frame.
-    expect(runFrameHasHistory(writtenPerAttempt[0][0])).toBe(true);
-    expect(runFrameHasHistory(writtenPerAttempt[1][0])).toBe(false);
+    expect(runFrameText(writtenPerAttempt[0][0])).toContain("[user]\nm0");
+    expect(runFrameText(writtenPerAttempt[0][0])).toContain("[user]\nm78");
+    expect(runFrameText(writtenPerAttempt[1][0])).toMatch(/\n\nanswer me$/);
+    expect(runFrameText(writtenPerAttempt[1][0])).not.toContain("<conversation_history>");
 
     const events = parseSSE(text);
     const content = events.map((e) => e.choices?.[0]?.delta?.content || "").join("");
