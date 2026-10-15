@@ -2,14 +2,13 @@
 import { randomUUID } from "node:crypto";
 import { nowSec } from "./_base.js";
 import { PROVIDERS } from "../../config/providers.js";
-import { CODEX_CLI_VERSION } from "../../config/appConstants.js";
+import { CODEX_CLI_VERSION, CODEX_IMAGES_MAIN_MODEL } from "../../config/appConstants.js";
 
 const CODEX_RESPONSES_URL = PROVIDERS["codex"].baseUrl;
 const CODEX_USER_AGENT = `codex_cli_rs/${CODEX_CLI_VERSION}`;
 const CODEX_ORIGINATOR = "codex_cli_rs";
 const CODEX_MODEL_SUFFIX = "-image";
 const CODEX_REF_DETAIL = "high";
-const CODEX_IMAGES_MAIN_MODEL = "gpt-5.5";
 const CODEX_TOOL_IMAGE_MODELS = new Set([
   "gpt-image-1.5",
   "gpt-image-2",
@@ -37,7 +36,8 @@ function stripImageSuffix(model) {
 
 function resolveCodexImageModels(model) {
   if (CODEX_TOOL_IMAGE_MODELS.has(model)) {
-    return { responsesModel: CODEX_IMAGES_MAIN_MODEL, toolModel: model };
+    const responsesModel = process.env.CODEX_IMAGE_RESPONSES_MODEL?.trim() || CODEX_IMAGES_MAIN_MODEL;
+    return { responsesModel, toolModel: model };
   }
   return { responsesModel: stripImageSuffix(model), toolModel: null };
 }
@@ -230,6 +230,13 @@ export default {
       store: false,
       reasoning: toolModel ? { effort: "medium", summary: "auto" } : null,
     };
+  },
+  // A main-model rejection says nothing about access to the requested image tool.
+  shouldSkipAccountCooldown: (message, requestBody, model) => {
+    const responsesModel = requestBody?.model;
+    return typeof responsesModel === "string" && responsesModel !== model
+      && requestBody.tools?.some(tool => tool.type === "image_generation" && tool.model === model)
+      && message.includes(`'${responsesModel}' model is not supported`);
   },
   // Custom: codex parses SSE → either pipe to client or collect b64
   async parseResponse(response, { log, streamToClient, onRequestSuccess, onUsage }) {

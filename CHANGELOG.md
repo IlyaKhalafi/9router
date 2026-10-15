@@ -1,3 +1,8 @@
+# Unreleased
+
+## Fixes
+- Codex image tools use GPT 5.6 Luna by default and support `CODEX_IMAGE_RESPONSES_MODEL` overrides. Rejected main models no longer lock the image model (#4859).
+
 # v0.5.99 (2026-10-08)
 
 ## Features
