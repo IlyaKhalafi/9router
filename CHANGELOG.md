@@ -1,3 +1,8 @@
+# Unreleased
+
+## Features
+- **Providers** add free and paid price filters when importing models from compatible providers (#4358).
+
 # v0.5.99 (2026-10-08)
 
 ## Features
